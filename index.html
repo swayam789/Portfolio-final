@@ -46,8 +46,19 @@
   #badge b{color:var(--copper);font-weight:500}
   #badge.show{opacity:1}
 
-  /* hidden input to summon mobile keyboards */
-  #kb{position:fixed;top:-200px;left:-200px;width:1px;height:1px;opacity:0;border:0;background:transparent;color:transparent}
+  /* hidden input to summon mobile keyboards - kept INSIDE the viewport (not
+     shoved off-screen) so iOS/Android don't try to scroll it into view and
+     give up/blur it the instant the keyboard opens (the "blink and close" bug).
+     font-size:16px stops iOS auto-zooming on focus, which was the other half
+     of that same flicker. */
+  #kb{position:fixed;bottom:0;left:0;width:1px;height:1px;opacity:0;border:0;background:transparent;color:transparent;font-size:16px}
+
+  #scene{transition:transform .25s ease}
+  @media (max-width:600px){
+    /* while the on-screen keyboard is up, shift the whole 3D view upward so
+       the monitor stays visible above it instead of being covered */
+    body.kb-open #scene{transform:translateY(-15vh)}
+  }
 
   #nogl{position:fixed;inset:0;display:none;align-items:center;justify-content:center;padding:30px;text-align:center;color:var(--mute);font-size:.85rem;line-height:1.8}
   #nogl a{color:var(--copper)}
@@ -841,6 +852,9 @@ kb.addEventListener('input', function(){
   kb.value = '';
 });
 canvas.addEventListener('pointerdown', function(){ kb.focus({preventScroll:true}); });
+// track keyboard-open state so the CSS above can lift the scene above it
+kb.addEventListener('focus', function(){ document.body.classList.add('kb-open'); });
+kb.addEventListener('blur',  function(){ document.body.classList.remove('kb-open'); });
 canvas.addEventListener('wheel', function(e){
   if(!booted) return;
   e.preventDefault();
