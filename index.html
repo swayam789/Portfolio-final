@@ -49,9 +49,14 @@
   /* hidden input to summon mobile keyboards - kept INSIDE the viewport (not
      shoved off-screen) so iOS/Android don't try to scroll it into view and
      give up/blur it the instant the keyboard opens (the "blink and close" bug).
-     font-size:16px stops iOS auto-zooming on focus, which was the other half
-     of that same flicker. */
-  #kb{position:fixed;bottom:0;left:0;width:1px;height:1px;opacity:0;border:0;background:transparent;color:transparent;font-size:16px}
+     Anchored top-left specifically: a spot that's already above where the
+     keyboard covers, so the OS never feels the need to auto-scroll/pan the
+     page to "reveal" it - that auto-pan was fighting our own translateY
+     below on real devices (fine in desktop responsive-mode, since that never
+     simulates a real keyboard's viewport panning) and kept nudging the view
+     further up with every keystroke. font-size:16px stops iOS auto-zooming
+     on focus, the other half of that same flicker. */
+  #kb{position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;border:0;background:transparent;color:transparent;font-size:16px;pointer-events:none}
 
   #scene{transition:transform .25s ease}
   @media (max-width:600px){
@@ -80,6 +85,8 @@
   }
   #hud button:hover{border-color:var(--copper)}
   #hud button:active{background:rgba(192,133,82,.25);border-color:var(--copper)}
+  #hud button:disabled{opacity:.35;cursor:default}
+  #hud button:disabled:active{background:rgba(18,22,28,.85);border-color:var(--line)}
   #hud button .ic{color:var(--copper);font-size:1rem;line-height:1}
   #hud .tag{
     font-size:.58rem;letter-spacing:.14em;color:var(--mute);
@@ -113,6 +120,10 @@
 
 <div id="hud">
   <div class="tag">now: <b id="hudNow">pc</b></div>
+  <div class="row">
+    <button id="hudUp" type="button" aria-label="Scroll terminal up"><span class="ic">▲</span></button>
+    <button id="hudDown" type="button" aria-label="Scroll terminal down"><span class="ic">▼</span></button>
+  </div>
   <div class="row">
     <button id="hudView" type="button" aria-label="Change view - cycles pc, resume, room"><span class="ic">⧉</span><span class="tx">VIEW</span></button>
     <button id="hudEsc" type="button" aria-label="Esc - same as pressing the Escape key"><span class="ic">⎋</span><span class="tx">ESC</span></button>
@@ -822,10 +833,11 @@ function hideHint(){
 }
 function handleKey(e){
   if(!acceptInput) return;
-  if(e.key !== 'Escape') scrollOff = 0;
+  if(e.key==='Escape'){ toggleView(); return; }        // always works, from any view
+  if(!inDeskView()) return;                             // no typing while on the résumé/room views
+  scrollOff = 0;
   if(e.ctrlKey && (e.key==='l'||e.key==='L')){ e.preventDefault(); lines=[]; draw(); return; }
   if(e.ctrlKey || e.metaKey || e.altKey) return;
-  if(e.key==='Escape'){ toggleView(); return; }
   if(e.key==='Enter'){ e.preventDefault(); var v=input; input=''; runCommand(v); hideHint(); return; }
   if(e.key==='Backspace'){ e.preventDefault(); input = input.slice(0,-1); draw(); return; }
   if(e.key==='ArrowUp'){ e.preventDefault(); if(history.length){ histIdx=Math.max(0,histIdx-1); input=history[histIdx]||''; draw(); } return; }
@@ -843,18 +855,27 @@ window.addEventListener('keydown', function(e){
   handleKey(e);
 });
 kb.addEventListener('keydown', function(e){
-  if(e.key && e.key.length===1){ e.preventDefault(); if(acceptInput){ input+=e.key; draw(); } return; }
+  if(e.key && e.key.length===1){ e.preventDefault(); if(acceptInput && inDeskView()){ input+=e.key; draw(); } return; }
   if(e.key==='Unidentified') return; // mobile → input event
   handleKey(e);
 });
 kb.addEventListener('input', function(){
-  if(kb.value && acceptInput){ input += kb.value; draw(); }
+  if(kb.value && acceptInput && inDeskView()){ input += kb.value; draw(); }
   kb.value = '';
 });
-canvas.addEventListener('pointerdown', function(){ kb.focus({preventScroll:true}); });
-// track keyboard-open state so the CSS above can lift the scene above it
+canvas.addEventListener('pointerdown', function(e){
+  if(!inDeskView()) return; // no keyboard needed while looking at the résumé/room
+  // Stop the browser's default focus handling for this touch/click. Without
+  // this, the synthetic mouse/click that follows a touch's pointerdown can
+  // blur the input we just focused (since the canvas itself isn't a focusable
+  // target), which is what made the keyboard flash open and immediately close.
+  e.preventDefault();
+  kb.focus({preventScroll:true});
+});
+// track keyboard-open state so the CSS above can lift the scene above it, and
+// so resize() (below) can ignore the height change the keyboard itself causes
 kb.addEventListener('focus', function(){ document.body.classList.add('kb-open'); });
-kb.addEventListener('blur',  function(){ document.body.classList.remove('kb-open'); });
+kb.addEventListener('blur',  function(){ document.body.classList.remove('kb-open'); resize(); });
 canvas.addEventListener('wheel', function(e){
   if(!booted) return;
   e.preventDefault();
@@ -874,6 +895,7 @@ var VIEW = {
 };
 var VIEW_ORDER = ['desk','paper','room'];   // esc cycles: pc → résumé → room → pc
 var viewIdx = 0;
+function inDeskView(){ return VIEW_ORDER[viewIdx] === 'desk'; }
 var camPos = VIEW.far.pos.clone(), camLook = VIEW.far.look.clone();
 var target = VIEW.desk;
 var introT = 0, introDur = reduceMotion ? .01 : 4.2, introDone = false;
@@ -886,15 +908,32 @@ function setView(name){
   target = VIEW[VIEW_ORDER[viewIdx]];
   var lbl = document.getElementById('hudNow');
   if(lbl) lbl.textContent = VIEW_LABEL[VIEW_ORDER[viewIdx]];
+  // typing only makes sense on the pc/desk view - grab the keyboard there,
+  // dismiss it everywhere else (also blocks the drastic resize()-driven
+  // zoom-out that opening the keyboard on the résumé/room view would cause)
+  if(booted){ if(inDeskView()) kb.focus({preventScroll:true}); else kb.blur(); }
+  updateHudScroll();
 }
 function toggleView(){ setView(VIEW_ORDER[(viewIdx+1)%VIEW_ORDER.length]); }
 
 /* HUD buttons: touch-friendly stand-ins for the Escape key. Both cycle the
    view (pc → résumé → room), exactly like pressing Esc does. */
 var hudView = document.getElementById('hudView'), hudEsc = document.getElementById('hudEsc');
-function hudCycle(){ if(!booted) return; toggleView(); hideHint(); kb.focus({preventScroll:true}); }
+function hudCycle(){ if(!booted) return; toggleView(); hideHint(); }
 hudView.addEventListener('click', hudCycle);
 hudEsc.addEventListener('click', hudCycle);
+
+/* HUD up/down: touch stand-in for the mouse wheel, scrolling the terminal's
+   history - only meaningful on the pc/desk view, so disabled elsewhere. */
+var hudUp = document.getElementById('hudUp'), hudDown = document.getElementById('hudDown');
+function updateHudScroll(){ hudUp.disabled = hudDown.disabled = !inDeskView(); }
+function hudScroll(n){
+  if(!booted || !inDeskView()) return;
+  scrollOff = Math.max(0, scrollOff + n);
+  draw();
+}
+hudUp.addEventListener('click', function(){ hudScroll(4); });
+hudDown.addEventListener('click', function(){ hudScroll(-4); });
 
 var mx=0,my=0,smx=0,smy=0;
 window.addEventListener('pointermove',function(e){
@@ -908,21 +947,31 @@ function lerp(a,b,t){ return a+(b-a)*t; }
 
 var BASE_DESK_Z  = VIEW.desk.pos.z;    // 3.05 - desktop baseline, kept fixed so resize() can rerun freely
 var BASE_PAPER_Y = VIEW.paper.pos.y;   // 3.62
+var stableHeight = innerHeight;        // last known height while the on-screen keyboard was closed
 
 function resize(){
   renderer.setSize(innerWidth, innerHeight);
   camera.aspect = innerWidth/innerHeight;
   camera.updateProjectionMatrix();
 
+  // On phones, opening the on-screen keyboard shrinks innerHeight the same
+  // way rotating to a short screen would - which used to yank the camera
+  // into a heavy zoom-out the instant you started typing. Freeze the height
+  // used for that calculation at whatever it was right before the keyboard
+  // opened, so typing itself never changes the framing.
+  var kbOpen = document.body.classList.contains('kb-open');
+  if(!kbOpen) stableHeight = innerHeight;
+  var effHeight = kbOpen ? stableHeight : innerHeight;
+
   // Continuously pull the camera back as the viewport shrinks - in either
   // dimension, so short landscape screens zoom out same as narrow portrait
   // ones - rather than snapping between a couple of fixed breakpoints. Kicks
   // in earlier and pulls back further/heavier the smaller the screen gets.
   var wT = clamp01((1000 - innerWidth) / (1000 - 300));
-  var hT = clamp01((820  - innerHeight) / (820  - 360));
+  var hT = clamp01((820  - effHeight) / (820  - 360));
   var t = smooth(Math.max(wT, hT));
 
-  VIEW.desk.pos.z  = lerp(BASE_DESK_Z, BASE_DESK_Z * 2.9, t);  // back from the monitor - heavier pull
+  VIEW.desk.pos.z  = lerp(BASE_DESK_Z, BASE_DESK_Z * 4.2, t);  // back from the monitor - heavier pull
   VIEW.paper.pos.y = BASE_PAPER_Y;                              // résumé view stays fixed, no zoom-out
 }
 window.addEventListener('resize', resize); resize();
