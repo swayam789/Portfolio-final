@@ -51,6 +51,39 @@
 
   #nogl{position:fixed;inset:0;display:none;align-items:center;justify-content:center;padding:30px;text-align:center;color:var(--mute);font-size:.85rem;line-height:1.8}
   #nogl a{color:var(--copper)}
+
+  /* HUD controls - view cycle / esc, for touch users with no physical Esc key */
+  #hud{
+    position:fixed;bottom:calc(18px + env(safe-area-inset-bottom,0px));right:calc(18px + env(safe-area-inset-right,0px));
+    z-index:15;display:flex;flex-direction:column;align-items:flex-end;gap:6px;
+    opacity:0;transition:opacity 1s;pointer-events:none;
+  }
+  #hud.show{opacity:1;pointer-events:auto}
+  #hud .row{display:flex;gap:8px}
+  #hud button{
+    font-family:'IBM Plex Mono',monospace;-webkit-tap-highlight-color:transparent;appearance:none;
+    background:rgba(18,22,28,.85);border:1px solid var(--line);color:var(--bone);
+    display:flex;align-items:center;justify-content:center;gap:6px;
+    min-height:44px;min-width:44px;padding:0 14px;border-radius:3px;
+    font-size:.68rem;letter-spacing:.12em;cursor:pointer;touch-action:manipulation;
+  }
+  #hud button:hover{border-color:var(--copper)}
+  #hud button:active{background:rgba(192,133,82,.25);border-color:var(--copper)}
+  #hud button .ic{color:var(--copper);font-size:1rem;line-height:1}
+  #hud .tag{
+    font-size:.58rem;letter-spacing:.14em;color:var(--mute);
+    background:rgba(18,22,28,.7);padding:3px 9px;border:1px solid var(--line);border-radius:3px;
+  }
+  #hud .tag b{color:var(--copper);font-weight:500;text-transform:uppercase}
+
+  /* small screens: shrink/wrap the chrome so nothing overflows or overlaps the HUD */
+  @media (max-width:600px){
+    #hint{font-size:.6rem;padding:9px 14px;white-space:normal;text-align:center;max-width:82vw;
+      bottom:calc(96px + env(safe-area-inset-bottom,0px))} /* clear the HUD stacked bottom-right */
+    #badge{font-size:.56rem;letter-spacing:.1em;max-width:56vw;line-height:1.5}
+    #hud button .tx{display:none}
+    #hud button{padding:0}
+  }
 </style>
 </head>
 <body>
@@ -66,6 +99,14 @@
 
 <div id="hint">click the screen &amp; type - try <b>help</b> · <b>esc</b> cycles pc → résumé → room</div>
 <div id="badge"><b>SWAYAM LAMA</b> - PORTFOLIO v3.0 - CHITWAN, NEPAL</div>
+
+<div id="hud">
+  <div class="tag">now: <b id="hudNow">pc</b></div>
+  <div class="row">
+    <button id="hudView" type="button" aria-label="Change view - cycles pc, resume, room"><span class="ic">⧉</span><span class="tx">VIEW</span></button>
+    <button id="hudEsc" type="button" aria-label="Esc - same as pressing the Escape key"><span class="ic">⎋</span><span class="tx">ESC</span></button>
+  </div>
+</div>
 
 <div id="nogl">Your browser couldn't start WebGL.<br>The plain-text version of this portfolio lives at <a href="https://swayamlama.com.np">swayamlama.com.np</a> - or email <a href="mailto:swayamlama4s@gmail.com">swayamlama4s@gmail.com</a>.</div>
 
@@ -753,6 +794,7 @@ function typeIntro(){
       booted = true; acceptInput = true; draw();
       document.getElementById('hint').classList.add('show');
       document.getElementById('badge').classList.add('show');
+      document.getElementById('hud').classList.add('show');
       return;
     }
     var s = seq[i++];
@@ -823,12 +865,22 @@ var target = VIEW.desk;
 var introT = 0, introDur = reduceMotion ? .01 : 4.2, introDone = false;
 function ease(t){ return t<.5 ? 4*t*t*t : 1-Math.pow(-2*t+2,3)/2; }
 
+var VIEW_LABEL = {desk:'pc', paper:'résumé', room:'room'};
 function setView(name){
   var i = VIEW_ORDER.indexOf(name);
   viewIdx = (i<0?0:i);
   target = VIEW[VIEW_ORDER[viewIdx]];
+  var lbl = document.getElementById('hudNow');
+  if(lbl) lbl.textContent = VIEW_LABEL[VIEW_ORDER[viewIdx]];
 }
 function toggleView(){ setView(VIEW_ORDER[(viewIdx+1)%VIEW_ORDER.length]); }
+
+/* HUD buttons: touch-friendly stand-ins for the Escape key. Both cycle the
+   view (pc → résumé → room), exactly like pressing Esc does. */
+var hudView = document.getElementById('hudView'), hudEsc = document.getElementById('hudEsc');
+function hudCycle(){ if(!booted) return; toggleView(); hideHint(); kb.focus({preventScroll:true}); }
+hudView.addEventListener('click', hudCycle);
+hudEsc.addEventListener('click', hudCycle);
 
 var mx=0,my=0,smx=0,smy=0;
 window.addEventListener('pointermove',function(e){
@@ -836,13 +888,28 @@ window.addEventListener('pointermove',function(e){
   my = e.clientY/innerHeight - .5;
 },{passive:true});
 
+function clamp01(v){ return v<0?0:(v>1?1:v); }
+function smooth(t){ return t*t*(3-2*t); }               // smoothstep - no hard jumps between sizes
+function lerp(a,b,t){ return a+(b-a)*t; }
+
+var BASE_DESK_Z  = VIEW.desk.pos.z;    // 3.05 - desktop baseline, kept fixed so resize() can rerun freely
+var BASE_PAPER_Y = VIEW.paper.pos.y;   // 3.62
+
 function resize(){
   renderer.setSize(innerWidth, innerHeight);
   camera.aspect = innerWidth/innerHeight;
   camera.updateProjectionMatrix();
-  // pull camera back a touch on narrow screens so the monitor fits
-  VIEW.desk.pos.z = innerWidth < 700 ? 4.3 : (innerWidth < 1000 ? 3.55 : 3.05);
-  VIEW.paper.pos.y = innerWidth < 700 ? 4.4 : (innerWidth < 1000 ? 3.9 : 3.62);
+
+  // Continuously pull the camera back as the viewport shrinks - in either
+  // dimension, so short landscape screens zoom out same as narrow portrait
+  // ones - rather than snapping between a couple of fixed breakpoints. Kicks
+  // in earlier and pulls back further/heavier the smaller the screen gets.
+  var wT = clamp01((1000 - innerWidth) / (1000 - 300));
+  var hT = clamp01((820  - innerHeight) / (820  - 360));
+  var t = smooth(Math.max(wT, hT));
+
+  VIEW.desk.pos.z  = lerp(BASE_DESK_Z, BASE_DESK_Z * 2.9, t);  // back from the monitor - heavier pull
+  VIEW.paper.pos.y = BASE_PAPER_Y;                              // résumé view stays fixed, no zoom-out
 }
 window.addEventListener('resize', resize); resize();
 
